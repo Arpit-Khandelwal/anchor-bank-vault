@@ -9,9 +9,19 @@ pub mod anchor_bank {
 
     use super::*;
 
-    pub fn create(ctx: Context<Create>) -> Result<()> {
+    pub fn destroy(ctx: Context<Withdraw>) -> Result<()> {
+        let amount = ctx.accounts.piggy_bank.to_account_info().lamports();
+
+        **ctx.accounts.piggy_bank.to_account_info().try_borrow_mut_lamports()? -= amount;
+
+        **ctx.accounts.signer.to_account_info().try_borrow_mut_lamports()? += amount;
+        Ok(())
+    }
+    pub fn create(ctx: Context<Create>, lock_duration: i64) -> Result<()> {
         ctx.accounts.piggy_bank.owner = ctx.accounts.signer.key();
         ctx.accounts.piggy_bank.bump = ctx.bumps.piggy_bank;
+        ctx.accounts.piggy_bank.unlock_time =
+            Clock::get()?.unix_timestamp + lock_duration;
         Ok(())
     }
 
@@ -43,9 +53,14 @@ pub mod anchor_bank {
     }
 
     pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
-        if ctx.accounts.piggy_bank.to_account_info().lamports() - amount < 0.02 as u64 * 1_000_000_000
+        if ctx.accounts.piggy_bank.to_account_info().lamports() - amount
+            < (1_000_000_000 * 2) / 100
         {
             return Err(ProgramError::InsufficientFunds.into());
+        }
+
+        if Clock::get()?.unix_timestamp < ctx.accounts.piggy_bank.unlock_time {
+            return err!(ErrorCode::Locked);
         }
 
         msg!("Withdrawing funds {}", amount);
@@ -78,14 +93,9 @@ pub mod anchor_bank {
         //     }
         // }
 
-        **ctx
-            .accounts
-            .piggy_bank
-            .to_account_info()
-            .try_borrow_mut_lamports()? -= amount;
+        **ctx.accounts.piggy_bank.to_account_info().try_borrow_mut_lamports()? -= amount;
 
-        **ctx.accounts.signer.to_account_info().try_borrow_mut_lamports()? +=
-            amount;
+        **ctx.accounts.signer.to_account_info().try_borrow_mut_lamports()? += amount;
         Ok(())
     }
 }
@@ -94,11 +104,12 @@ pub mod anchor_bank {
 pub struct PiggyBank {
     pub owner: Pubkey,
     pub bump: u8,
+    pub unlock_time: i64,
 }
 
 #[derive(Accounts)]
 pub struct Create<'info> {
-    #[account(init, seeds=[signer.key().as_ref(),b"deposit"], bump,payer=signer, space=8+32+1)]
+    #[account(init, seeds=[signer.key().as_ref(),b"deposit"], bump,payer=signer, space=8+32+1+8)]
     pub piggy_bank: Account<'info, PiggyBank>,
 
     #[account(mut)]
@@ -134,4 +145,10 @@ pub struct Withdraw<'info> {
     pub signer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
+}
+
+#[error_code]
+pub enum ErrorCode {
+    #[msg("You are too early! The piggy bank is still locked.")]
+    Locked,
 }
