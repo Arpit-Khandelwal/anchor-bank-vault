@@ -43,57 +43,81 @@ pub mod anchor_bank {
     }
 
     pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
-        if ctx.accounts.piggy_bank.to_account_info().lamports() - amount < 0.02 as u64 * 1_000_000_000
-        {
+        let piggy_bank = &ctx.accounts.piggy_bank;
+        let signer = &ctx.accounts.signer;
+
+        let current_balance = piggy_bank.to_account_info().lamports();
+        // Dynamic rent check
+        let rent = Rent::get()?;
+        let min_balance = rent.minimum_balance(piggy_bank.to_account_info().data_len());
+
+        if amount > current_balance {
             return Err(ProgramError::InsufficientFunds.into());
         }
 
-        msg!("Withdrawing funds {}", amount);
+        let remaining_balance = current_balance.checked_sub(amount).unwrap();
 
-        // let signer = ctx.accounts.signer.key();
-        // let bump = ctx.accounts.piggy_bank.bump;
-        // let signer_seeds = &[signer.as_ref(), b"deposit", &[bump]];
-        // let signer_seeds = &[&signer_seeds[..]];
+        // If withdrawal would leave less than rent-exempt minimum, close the account entirely
+        if remaining_balance < min_balance {
+            msg!(
+                "Withdrawal leaves {} < rent {}. Closing account and transferring full balance.",
+                remaining_balance,
+                min_balance
+            );
+            **piggy_bank.to_account_info().try_borrow_mut_lamports()? = 0;
+            **signer.to_account_info().try_borrow_mut_lamports()? = signer
+                .lamports()
+                .checked_add(current_balance)
+                .ok_or(ErrorCode::Overflow)?;
+        } else {
+            msg!("Withdrawing funds {}", amount);
+            **piggy_bank.to_account_info().try_borrow_mut_lamports()? -= amount;
+            **signer.to_account_info().try_borrow_mut_lamports()? += amount;
+        }
 
-        // // &'a [&'b [&'c [u8]]]
-
-        // let cpi_context = CpiContext::new_with_signer(
-        //     ctx.accounts.system_program.to_account_info(),
-        //     anchor_lang::system_program::Transfer {
-        //         from: ctx.accounts.piggy_bank.to_account_info(),
-        //         to: ctx.accounts.signer.to_account_info(),
-        //     },
-        //     signer_seeds,
-        // );
-
-        // let res = anchor_lang::system_program::transfer(cpi_context, amount);
-        // match res {
-        //     Result::Err(_e) => {
-        //         msg!("Withdrawal failed, insufficient funds");
-        //         return Err(_e.into());
-        //     }
-        //     Result::Ok(_) => {
-        //         msg!("Withdrawal of {} lamports successful", amount);
-        //         return Ok(());
-        //     }
-        // }
-
-        **ctx
-            .accounts
-            .piggy_bank
-            .to_account_info()
-            .try_borrow_mut_lamports()? -= amount;
-
-        **ctx.accounts.signer.to_account_info().try_borrow_mut_lamports()? +=
-            amount;
         Ok(())
     }
+    pub fn reset(ctx: Context<Reset>) -> Result<()> {
+        msg!("Resetting account...");
+        let piggy_bank = &ctx.accounts.piggy_bank;
+        let signer = &ctx.accounts.signer;
+
+        // Close the account by transferring all lamports to the signer
+        let dest_starting_lamports = signer.lamports();
+        let src_lamports = piggy_bank.lamports();
+
+        **piggy_bank.to_account_info().try_borrow_mut_lamports()? = 0;
+        **signer.to_account_info().try_borrow_mut_lamports()? = dest_starting_lamports
+            .checked_add(src_lamports)
+            .ok_or(ErrorCode::Overflow)?;
+
+        msg!("Account reset successful");
+        Ok(())
+    }
+}
+
+#[error_code]
+pub enum ErrorCode {
+    #[msg("Math overflow.")]
+    Overflow,
 }
 
 #[account()]
 pub struct PiggyBank {
     pub owner: Pubkey,
     pub bump: u8,
+}
+
+#[derive(Accounts)]
+pub struct Reset<'info> {
+    /// CHECK: We are resetting this account, so we don't care about its data.
+    #[account(mut, seeds=[signer.key().as_ref(), b"deposit"], bump)]
+    pub piggy_bank: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub signer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
